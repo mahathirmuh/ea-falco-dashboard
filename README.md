@@ -1,8 +1,25 @@
-# Welcome to your Lovable project
+# ID Card Processor
 
 ## Project info
 
 **URL**: https://lovable.dev/projects/6f543ba1-7ba3-4a8f-b536-2dbd5755b18e
+
+## About
+
+ID Card Processor is a comprehensive application for processing and analyzing ID card images. It features:
+
+- **File Upload**: Support for multiple image formats and Excel files
+- **Image Processing**: Advanced ID card preprocessing using Python scripts
+- **Processing Modes**: Images only or combined images and Excel processing
+- **Real-time Status**: Live updates on processing progress
+- **Download Results**: Easy access to processed files
+
+## Architecture
+
+- **Frontend**: React + Vite + TailwindCSS + Shadcn UI
+- **Backend**: Node.js + Express
+- **Processing Engine**: Python script integration
+- **File Management**: Multer for uploads, organized session-based storage
 
 ## How can I edit this code?
 
