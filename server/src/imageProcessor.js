@@ -121,34 +121,41 @@ class ImageProcessor {
             let cropX, cropY, cropSide;
 
             if (this.faceSupport.available) {
-                // Prepare tensor for face-api
-                const buffer = await sharp(inputPath).toBuffer();
-                const { createCanvas, Image } = require('canvas');
-                const canvas = createCanvas(W, H);
-                const ctx = canvas.getContext('2d');
-                const image = new Image();
-                image.src = buffer;
-                ctx.drawImage(image, 0, 0);
+                try {
+                    // Prepare tensor for face-api
+                    const buffer = await sharp(inputPath).toBuffer();
+                    const { createCanvas, Image } = require('canvas');
+                    const canvas = createCanvas(W, H);
+                    const ctx = canvas.getContext('2d');
+                    const image = new Image();
+                    image.src = buffer;
+                    ctx.drawImage(image, 0, 0);
 
-                const options = new this.faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 });
-                const detection = await this.faceapi.detectSingleFace(canvas, options);
-                if (detection && detection.box) {
-                    const box = detection.box;
-                    const faceW = box.width;
-                    const faceH = box.height;
-                    const faceArea = faceW * faceH;
-                    // cropSide such that after resize to 400, face occupies desiredRatio of area
-                    cropSide = Math.ceil(Math.sqrt(faceArea / desiredRatio));
-                    cropSide = Math.max(cropSide, Math.max(faceW, faceH));
-                    cropSide = Math.min(cropSide, Math.min(W, H));
+                    const options = new this.faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.3 });
+                    const detection = await this.faceapi.detectSingleFace(canvas, options);
+                    if (detection && detection.box) {
+                        const box = detection.box;
+                        const faceW = box.width;
+                        const faceH = box.height;
+                        const faceArea = faceW * faceH;
+                        // cropSide such that after resize to 400, face occupies desiredRatio of area
+                        cropSide = Math.ceil(Math.sqrt(faceArea / desiredRatio));
+                        cropSide = Math.max(cropSide, Math.max(faceW, faceH));
+                        cropSide = Math.min(cropSide, Math.min(W, H));
 
-                    const cx = box.x + faceW / 2;
-                    const cy = box.y + faceH / 2;
-                    cropX = Math.round(cx - cropSide / 2);
-                    cropY = Math.round(cy - cropSide / 2);
-                    // Clamp
-                    cropX = Math.max(0, Math.min(cropX, W - cropSide));
-                    cropY = Math.max(0, Math.min(cropY, H - cropSide));
+                        const cx = box.x + faceW / 2;
+                        const cy = box.y + faceH / 2;
+                        cropX = Math.round(cx - cropSide / 2);
+                        cropY = Math.round(cy - cropSide / 2);
+                        // Clamp
+                        cropX = Math.max(0, Math.min(cropX, W - cropSide));
+                        cropY = Math.max(0, Math.min(cropY, H - cropSide));
+                    } else {
+                        // No detection found; fall back to heuristic by leaving cropX undefined
+                    }
+                } catch (e) {
+                    console.warn('Face detection error; falling back to heuristic:', e.message);
+                    // Leave cropX undefined to trigger heuristic fallback below
                 }
             }
 
@@ -158,6 +165,7 @@ class ImageProcessor {
                 const baseSide = Math.min(W, H);
                 const scale = Math.min(Math.max(1.0 - desiredRatio * 0.5, 0.35), 0.95); // clamp to avoid too small/large crops
                 cropSide = Math.floor(baseSide * scale);
+                cropSide = Math.max(cropSide, 1);
 
                 const cx = Math.floor(W / 2);
                 const cy = Math.floor(H / 2);
