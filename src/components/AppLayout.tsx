@@ -12,7 +12,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { cn } from "@/lib/utils";
-import { FileImage, Shield } from "lucide-react";
+import { FileImage, Shield, PenSquare } from "lucide-react";
 
 type AppLayoutProps = {
   title?: string;
@@ -46,6 +46,14 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ title, children }) => {
                 <SidebarMenuButton isActive={isActive("/register-vault")}> 
                   <Shield />
                   <span>Register Vault</span>
+                </SidebarMenuButton>
+              </Link>
+            </SidebarMenuItem>
+            <SidebarMenuItem>
+              <Link to="/update-vault" className="contents">
+                <SidebarMenuButton isActive={isActive("/update-vault")}> 
+                  <PenSquare />
+                  <span>Update Vault Card</span>
                 </SidebarMenuButton>
               </Link>
             </SidebarMenuItem>

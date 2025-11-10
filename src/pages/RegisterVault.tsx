@@ -69,7 +69,7 @@ const RegisterVault: React.FC = () => {
   const [searchParams] = useSearchParams();
   const [previewing, setPreviewing] = useState(false);
   const [previewSummary, setPreviewSummary] = useState<VaultRegistrationSummary | null>(null);
-  const [previewMode, setPreviewMode] = useState<'job' | 'csv' | null>(null);
+  const [previewMode, setPreviewMode] = useState<'job' | 'csv' | 'update_csv' | null>(null);
   const [registering, setRegistering] = useState(false);
   const [regSummary, setRegSummary] = useState<VaultRegistrationSummary | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -80,6 +80,10 @@ const RegisterVault: React.FC = () => {
   const [uploadedCsvPath, setUploadedCsvPath] = useState<string | undefined>();
   const [uploadingCsv, setUploadingCsv] = useState(false);
   const [csvPathInput, setCsvPathInput] = useState<string>('');
+  // UpdateCard upload state
+  const [uploadedUpdatePath, setUploadedUpdatePath] = useState<string | undefined>();
+  const [uploadingUpdate, setUploadingUpdate] = useState(false);
+  const [csvUpdatePathInput, setCsvUpdatePathInput] = useState<string>('');
 
   useEffect(() => {
     const jobIdParam = searchParams.get("jobId") || undefined;
@@ -217,6 +221,69 @@ const RegisterVault: React.FC = () => {
     }
   };
 
+  // Upload and preview for UpdateCard (CSV/Excel)
+  const handleUploadUpdateCsv = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    const form = new FormData();
+    for (const f of Array.from(files)) form.append('files', f);
+    form.append('processingMode', 'images_and_excel');
+    try {
+      setUploadingUpdate(true);
+      const res = await fetch('/api/upload', { method: 'POST', body: form });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: UploadResponse = await res.json();
+      if (!data.success) throw new Error(data.error || 'Upload failed');
+      const filesList: UploadedFileInfo[] = Array.isArray(data.files) ? data.files : [];
+      const updateFile = filesList.find((f) => f.originalName.toLowerCase().endsWith('.csv') || f.originalName.toLowerCase().endsWith('.xlsx') || f.originalName.toLowerCase().endsWith('.xls'));
+      if (!updateFile) throw new Error('No CSV/Excel file found in upload');
+      setUploadedUpdatePath(updateFile.path);
+      toast({ title: 'File uploaded', description: 'Ready to preview for UpdateCard.' });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast({ title: 'Upload failed', description: message, variant: 'destructive' });
+    } finally {
+      setUploadingUpdate(false);
+    }
+  };
+
+  const handlePreviewUploadedUpdateCsv = async () => {
+    if (!uploadedUpdatePath) {
+      toast({ title: 'No file uploaded', description: 'Please upload a CSV/Excel first.' });
+      return;
+    }
+    try {
+      setPreviewing(true);
+      setPreviewSummary(null);
+      const res = await fetch('/api/vault/preview-update-csv', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ csvPath: uploadedUpdatePath })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || 'Preview UpdateCard CSV failed');
+      const summary: VaultRegistrationSummary = {
+        success: true,
+        jobId: data.jobId,
+        endpointBaseUrl: data.endpointBaseUrl,
+        attempted: data.attempted ?? 0,
+        registered: data.registered ?? 0,
+        withPhoto: data.withPhoto ?? 0,
+        withoutPhoto: data.withoutPhoto ?? 0,
+        errors: Array.isArray(data.errors) ? data.errors : [],
+        details: Array.isArray(data.details) ? data.details : [],
+      };
+      setPreviewSummary(summary);
+      setPreviewMode('update_csv');
+      toast({ title: 'UpdateCard preview ready', description: `Found ${summary.attempted} rows.` });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast({ title: 'Preview UpdateCard CSV failed', description: message, variant: 'destructive' });
+    } finally {
+      setPreviewing(false);
+    }
+  };
+
   const handleExecuteRegistration = async () => {
     if (!previewSummary) return;
     try {
@@ -230,10 +297,11 @@ const RegisterVault: React.FC = () => {
         const downloadCard = (downloadCardEdits[idx] ?? defaultDownload);
         return { index: idx, cardNo, downloadCard };
       });
-      const res = await fetch(previewMode === 'csv' ? `/api/vault/register-csv` : `/api/vault/register`, {
+      const endpoint = previewMode === 'csv' ? `/api/vault/register-csv` : (previewMode === 'update_csv' ? `/api/vault/update-csv` : `/api/vault/register`);
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(previewMode === 'csv' ? { csvPath: uploadedCsvPath, overrides } : { jobId: selectedJobId, overrides }),
+        body: JSON.stringify(previewMode === 'csv' ? { csvPath: uploadedCsvPath, overrides } : (previewMode === 'update_csv' ? { csvPath: uploadedUpdatePath, overrides } : { jobId: selectedJobId, overrides })),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -263,10 +331,10 @@ const RegisterVault: React.FC = () => {
     if (!previewSummary) return;
     try {
       const rows = previewSummary.details.slice(0, 100).map((d, idx) => ({ index: idx, cardNo: (cardNoEdits[idx] ?? d.cardNo ?? '').trim(), staffNo: (d.staffNo ?? '').trim() }));
-      const res = await fetch(previewMode === 'csv' ? '/api/vault/photo-check-csv' : '/api/vault/photo-check', {
+      const res = await fetch(previewMode === 'csv' || previewMode === 'update_csv' ? '/api/vault/photo-check-csv' : '/api/vault/photo-check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(previewMode === 'csv' ? { csvPath: uploadedCsvPath, rows } : { jobId: selectedJobId, rows })
+        body: JSON.stringify(previewMode === 'csv' ? { csvPath: uploadedCsvPath, rows } : (previewMode === 'update_csv' ? { csvPath: uploadedUpdatePath, rows } : { jobId: selectedJobId, rows }))
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
@@ -386,6 +454,85 @@ const RegisterVault: React.FC = () => {
                     className="w-full sm:w-auto"
                   >
                     Preview CSV from path
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Update existing cards from CSV/Excel — hidden once a job preview is initiated */}
+        {previewMode !== 'job' && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Update Existing Cards (CSV/Excel)</CardTitle>
+              <CardDescription>Upload an Excel/CSV following the UpdateCard schema to update existing cards in Vault</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  onClick={async () => {
+                    try {
+                      const resp = await fetch('/api/vault/template/update-card.xlsx');
+                      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                      const blob = await resp.blob();
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = 'UpdateCardTemplate.xlsx';
+                      document.body.appendChild(a);
+                      a.click();
+                      a.remove();
+                      URL.revokeObjectURL(url);
+                    } catch (err) {
+                      const message = err instanceof Error ? err.message : String(err);
+                      toast({ title: 'Download template failed', description: message, variant: 'destructive' });
+                    }
+                  }}
+                >
+                  Download Update Template (Excel)
+                </Button>
+              </div>
+              <Separator />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Select CSV/Excel</label>
+                  <Input type="file" accept=".csv,.xlsx,.xls" onChange={(e) => handleUploadUpdateCsv(e.target.files)} />
+                  {uploadedUpdatePath && (
+                    <div className="text-xs text-muted-foreground break-all">Uploaded: {uploadedUpdatePath}</div>
+                  )}
+                </div>
+                <div className="flex items-end gap-2">
+                  <Button onClick={handlePreviewUploadedUpdateCsv} disabled={uploadingUpdate || !uploadedUpdatePath} className="w-full sm:w-auto">
+                    {previewing ? 'Preparing preview...' : 'Preview Uploaded File'}
+                  </Button>
+                </div>
+              </div>
+              <Separator />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-sm font-medium">Or use an existing server file path</label>
+                  <Input
+                    placeholder="e.g. C:\\Scripts\\Projects\\data-interpret-kit\\server\\uploads\\<session>\\UpdateData.xlsx"
+                    value={csvUpdatePathInput}
+                    onChange={(e) => setCsvUpdatePathInput(e.target.value)}
+                  />
+                </div>
+                <div className="flex items-end gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      if (!csvUpdatePathInput) {
+                        toast({ title: 'File path required', description: 'Please enter a CSV/Excel path.' });
+                        return;
+                      }
+                      setUploadedUpdatePath(csvUpdatePathInput);
+                      await handlePreviewUploadedUpdateCsv();
+                    }}
+                    className="w-full sm:w-auto"
+                  >
+                    Preview from path
                   </Button>
                 </div>
               </div>

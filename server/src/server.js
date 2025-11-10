@@ -8,11 +8,13 @@ const path = require('path');
 const fs = require('fs-extra');
 const archiver = require('archiver');
 const crypto = require('crypto');
+const XLSX = require('xlsx');
 const { getProcessingResults } = require('./python_integration');
 const ImageProcessor = require('./imageProcessor');
 const JobManager = require('./jobManager');
 const database = require('./database');
-const { registerJobToVault, previewJobToVault, registerCsvPathToVault, previewCsvPathToVault } = require('./vaultRegistrar');
+const { registerJobToVault, previewJobToVault, registerCsvPathToVault, previewCsvPathToVault, updateCsvPathToVault, previewUpdateCsvPathToVault, updateCsvRowToVault, updateProfileToVault } = require('./vaultRegistrar');
+const sql = require('mssql');
 const { photoExists } = require('./vaultRegistrar');
 const imageProcessor = new ImageProcessor();
 let jobManager; // Will be initialized after database connection
@@ -517,6 +519,90 @@ app.post('/api/vault/register-csv', async (req, res) => {
     }
 });
 
+// Preview Vault update from a direct CSV/Excel path
+app.post('/api/vault/preview-update-csv', async (req, res) => {
+    try {
+        const { csvPath } = req.body || {};
+        if (!csvPath) {
+            return res.status(400).json({ success: false, error: 'csvPath is required' });
+        }
+        const preview = previewUpdateCsvPathToVault({ csvPath });
+        const endpoint = process.env.VAULT_API_BASE || 'http://10.60.10.6/Vaultsite/APIwebservice.asmx';
+        res.json({ success: true, ...preview, endpointBaseUrl: endpoint });
+    } catch (error) {
+        console.error('Error previewing UpdateCard CSV:', error);
+        res.status(500).json({ success: false, error: 'Failed to preview UpdateCard CSV', details: error.message });
+    }
+});
+
+// Update existing Vault cards from a direct CSV/Excel path
+app.post('/api/vault/update-csv', async (req, res) => {
+    try {
+        const { csvPath, endpointBaseUrl, overrides } = req.body || {};
+        if (!csvPath) {
+            return res.status(400).json({ success: false, error: 'csvPath is required' });
+        }
+        const endpoint = endpointBaseUrl || process.env.VAULT_API_BASE || 'http://10.60.10.6/Vaultsite/APIwebservice.asmx';
+        const result = await updateCsvPathToVault({ csvPath, endpointBaseUrl: endpoint, overrides });
+        const success = (Array.isArray(result.errors) ? result.errors.length : 0) === 0;
+        res.json({ success, ...result });
+    } catch (error) {
+        console.error('Error updating Vault cards from CSV:', error);
+        res.status(500).json({ success: false, error: 'Failed to update Vault cards from CSV', details: error.message });
+    }
+});
+
+// Update a single row (by index) from a direct CSV/Excel path
+app.post('/api/vault/update-csv-row', async (req, res) => {
+    try {
+        const { csvPath, index, endpointBaseUrl, override } = req.body || {};
+        if (csvPath === undefined || csvPath === null || String(csvPath).trim() === '') {
+            return res.status(400).json({ success: false, error: 'csvPath is required' });
+        }
+        if (typeof index !== 'number' || index < 0) {
+            return res.status(400).json({ success: false, error: 'index must be a non-negative number' });
+        }
+        const endpoint = endpointBaseUrl || process.env.VAULT_API_BASE || 'http://10.60.10.6/Vaultsite/APIwebservice.asmx';
+        const result = await updateCsvRowToVault({ csvPath, index, endpointBaseUrl: endpoint, override });
+        const success = (Array.isArray(result.errors) ? result.errors.length : 0) === 0;
+        const rowStatus = result.rowStatus || {
+            ok: success,
+            code: result.details && result.details[0] ? result.details[0].respCode : undefined,
+            message: result.details && result.details[0] ? result.details[0].respMessage : undefined,
+        };
+        res.json({ success, requestId: result.requestId, rowStatus, ...result });
+    } catch (error) {
+        console.error('Error updating single Vault card from CSV:', error);
+        res.status(500).json({ success: false, error: 'Failed to update single Vault card from CSV', details: error.message });
+    }
+});
+
+// Download Excel template for UpdateCard
+app.get('/api/vault/template/update-card.xlsx', async (req, res) => {
+    try {
+        // Define the template columns based on user-provided schema
+        const headers = [
+            // Identity & employment
+            'CARD NO', 'NAME', 'COMPANY', 'STAFF ID', 'STATUS', 'DIVISION', 'DEPARTMENT', 'SECTION', 'TITLE', 'POSITION', 'GENDER',
+            'KTP/PASPORT NO', 'PLACE OF BIRTH', 'DATE OF BIRTH', 'ADDRESS', 'PHONE NO', 'DATE OF HIRE', 'POINT OF HIRE', 'RACE',
+            'DATE OF MCU', 'WORK PERIOD START', 'WORK PERIOD END', 'MCU RESULTS', 'CARD STATUS',
+            // Access controls (new columns)
+            'ACCESS LEVEL', 'FACE ACCESS LEVEL', 'LIFT ACCESS LEVEL', 'MESSHALL', 'VEHICLE NO'
+        ];
+        const wsData = [headers];
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(wsData);
+        XLSX.utils.book_append_sheet(wb, ws, 'UpdateCardTemplate');
+        const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename="UpdateCardTemplate.xlsx"');
+        return res.send(buf);
+    } catch (error) {
+        console.error('Error generating template:', error);
+        res.status(500).json({ success: false, error: 'Failed to generate template', details: error.message });
+    }
+});
+
 // Photo existence check for preview edits
 app.post('/api/vault/photo-check', async (req, res) => {
     try {
@@ -558,6 +644,142 @@ app.post('/api/vault/photo-check-csv', async (req, res) => {
     } catch (error) {
         console.error('Error checking photos (CSV):', error);
         res.status(500).json({ success: false, error: 'Failed to check photos for CSV', details: error.message });
+    }
+});
+
+// Update a single card directly from database (DataDBEnt) using card number
+// Body: { cardNo, endpointBaseUrl?, dbServer?, dbName?, dbUser?, dbPass?, dbPort?, overrides? }
+app.post('/api/vault/update-card-db', async (req, res) => {
+    try {
+        const { cardNo, endpointBaseUrl, dbServer, dbName, dbUser, dbPass, dbPort, overrides } = req.body || {};
+        const cn = String(cardNo || '').trim();
+        if (!cn) {
+            return res.status(400).json({ success: false, error: 'cardNo is required' });
+        }
+        // Resolve DB connection config (fallback to server/.env DATADB_* values)
+        const config = {
+            user: dbUser || process.env.DATADB_USER,
+            password: dbPass || process.env.DATADB_PASSWORD,
+            server: dbServer || process.env.DATADB_SERVER,
+            database: dbName || process.env.DATADB_NAME || 'DataDBEnt',
+            port: (dbPort ? parseInt(dbPort) : (parseInt(process.env.DATADB_PORT) || 1433)),
+            options: { encrypt: false, trustServerCertificate: true, enableArithAbort: true },
+            pool: { max: 5, min: 0, idleTimeoutMillis: 30000 },
+        };
+
+        // Connect and fetch card row
+        await sql.connect(config);
+        const request = new sql.Request();
+        request.input('cardNo', sql.NVarChar(20), cn);
+        // Try common column casings
+        let result = await request.query('SELECT TOP 1 * FROM carddb WHERE cardno = @cardNo');
+        if (!result.recordset || result.recordset.length === 0) {
+            result = await request.query('SELECT TOP 1 * FROM carddb WHERE CardNo = @cardNo');
+        }
+        if (!result.recordset || result.recordset.length === 0) {
+            return res.status(404).json({ success: false, error: `Card not found in carddb: ${cn}` });
+        }
+        const row = result.recordset[0] || {};
+
+        // Build profile with clipping similar to script
+        const max = { Name: 40, Department: 30, Company: 30, Title: 25, Position: 25, Address1: 50, Address2: 50, Email: 50, MobileNo: 20, VehicleNo: 20, StaffNo: 15 };
+        const clip = (v, m) => { if (v === undefined || v === null) return ''; const s = String(v).trim(); return s.length > m ? s.slice(0, m) : s; };
+        const normalizeExcelDate = (val) => {
+            if (val === null || typeof val === 'undefined') return '';
+            const s = String(val).trim();
+            if (!s) return '';
+            if (/^\d+(\.\d+)?$/.test(s)) {
+                const serial = parseFloat(s);
+                const ms = (serial - 25569) * 86400 * 1000;
+                const d = new Date(ms);
+                if (!isNaN(d.getTime())) {
+                    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+                    const day = d.getUTCDate();
+                    const mon = months[d.getUTCMonth()];
+                    const year = d.getUTCFullYear();
+                    return `${day} ${mon} ${year}`;
+                }
+            }
+            return s;
+        };
+        const profile = {
+            CardNo: String(row.CardNo || row.cardno || row.CARDNO || cn).trim(),
+            Name: clip(row.Name || row.NAME, max.Name),
+            Department: clip(row.Department || row.DEPT || row.DepartmentName, max.Department),
+            Company: clip(row.Company || row.COMPANY, max.Company),
+            Title: clip(row.Title || row.TITLE, max.Title),
+            Position: clip(row.Position || row.POSITION, max.Position),
+            Gentle: String(row.Gentle || row.Gender || row.SEX || '').trim(),
+            NRIC: String(row.NRIC || row.IdNo || '').trim(),
+            Passport: String(row.Passport || '').trim(),
+            Race: String(row.Race || '').trim(),
+            DOB: normalizeExcelDate(row.DOB || row.BirthDate || ''),
+            JoiningDate: normalizeExcelDate(row.JoiningDate || row.JoinDate || ''),
+            ResignDate: normalizeExcelDate(row.ResignDate || row.ExitDate || ''),
+            Address1: clip(row.Address1 || row.Address || '', max.Address1),
+            Address2: clip(row.Address2 || '', max.Address2),
+            Email: clip(row.Email || '', max.Email),
+            MobileNo: clip(row.MobileNo || row.Phone || row.Contact || '', max.MobileNo),
+            ActiveStatus: 'true',
+            NonExpired: 'true',
+            ExpiredDate: String(row.ExpiredDate || '').trim(),
+            AccessLevel: String(row.AccessLevel || row.MESSHALL || row.Access || '00').trim(),
+            FaceAccessLevel: String(row.FaceAccessLevel || '00').trim(),
+            LiftAccessLevel: String(row.LiftAccessLevel || '00').trim(),
+            VehicleNo: clip(row.VehicleNo || row.Vehicle || row.Remark || '', max.VehicleNo),
+            Download: 'true',
+            Photo: null,
+            StaffNo: clip(row.StaffNo || row.StaffID || '', max.StaffNo),
+        };
+
+        // Apply overrides if provided
+        const ov = overrides || {};
+        const apply = (k, v) => { if (v !== undefined && v !== null && v !== '') profile[k] = String(v).trim(); };
+        apply('AccessLevel', ov.accessLevel ?? ov.AccessLevel);
+        apply('FaceAccessLevel', ov.faceLevel ?? ov.FaceAccessLevel);
+        apply('LiftAccessLevel', ov.liftLevel ?? ov.LiftAccessLevel);
+        apply('Department', ov.department ?? ov.Department);
+        apply('Title', ov.title ?? ov.Title);
+        apply('Position', ov.position ?? ov.Position);
+        apply('Gentle', ov.gender ?? ov.Gender);
+        apply('Passport', ov.passport ?? ov.Passport);
+        apply('NRIC', ov.nric ?? ov.NRIC);
+        apply('DOB', ov.dob ?? ov.DOB);
+        apply('Address1', ov.address ?? ov.Address1);
+        apply('Address2', ov.address2 ?? ov.Address2);
+        apply('MobileNo', ov.phone ?? ov.MobileNo);
+        apply('JoiningDate', ov.joinDate ?? ov.JoiningDate);
+        apply('Race', ov.race ?? ov.Race);
+        apply('VehicleNo', ov.vehicle ?? ov.VehicleNo);
+        apply('ActiveStatus', (() => {
+            const val = ov.active ?? ov.ActiveStatus ?? ov.cardStatus;
+            if (val === undefined || val === null || val === '') return undefined;
+            const s = String(val).trim().toLowerCase();
+            if (s === 'true' || s === 'yes' || s === '1') return 'true';
+            if (s === 'false' || s === 'no' || s === '0') return 'false';
+            return String(val).trim();
+        })());
+        if (ov.messhall) {
+            profile.VehicleNo = clip(ov.messhall, max.VehicleNo);
+        }
+        // Map messhall/vehicle values to standardized strings and clip safely
+        if (profile.VehicleNo) {
+            const v = String(profile.VehicleNo).toLowerCase();
+            if (v.includes('makarti')) profile.VehicleNo = 'Makarti';
+            else if (v.includes('labota')) profile.VehicleNo = 'Labota';
+            else if (v.includes('local') || v.includes('no access')) profile.VehicleNo = 'NoAccess';
+            profile.VehicleNo = String(profile.VehicleNo).slice(0, 15);
+        }
+
+        const endpoint = endpointBaseUrl || process.env.VAULT_API_BASE || 'http://10.60.10.6/Vaultsite/APIwebservice.asmx';
+        const resp = await updateProfileToVault({ profile, endpointBaseUrl: endpoint, outputDir });
+        const success = !!resp.ok;
+        res.json({ success, code: resp.code, message: resp.message, requestId: resp.requestId, profile });
+    } catch (error) {
+        console.error('Error updating Vault card from DB:', error);
+        res.status(500).json({ success: false, error: 'Failed to update Vault card from DB', details: error.message });
+    } finally {
+        try { await sql.close(); } catch {}
     }
 });
 
@@ -690,18 +912,10 @@ app.use('*', (req, res) => {
     });
 });
 
-// Initialize database connection and start server
+// Start server immediately, then attempt database connection asynchronously
 async function startServer() {
     try {
-        // Initialize database connection
-        await database.connect();
-        console.log('✅ Database connected successfully');
-        
-        // Initialize JobManager after database connection
-        jobManager = new JobManager();
-        console.log('✅ JobManager initialized');
-        
-        // Start server
+        // Start server first so endpoints that don't require DB (e.g., template download) work
         app.listen(PORT, () => {
             console.log(`🚀 ID Card Processing Backend running on port ${PORT}`);
             console.log(`📁 Upload directory: ${uploadDir}`);
@@ -709,6 +923,18 @@ async function startServer() {
             console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
             console.log(`💾 Database: ${process.env.DATADB_SERVER}:${process.env.DATADB_PORT}/${process.env.DATADB_NAME}`);
         });
+
+        // Attempt database connection without blocking server startup
+        database.connect()
+            .then(() => {
+                console.log('✅ Database connected successfully');
+                // Initialize JobManager after database connection
+                jobManager = new JobManager();
+                console.log('✅ JobManager initialized');
+            })
+            .catch((error) => {
+                console.error('⚠️ Database connection failed. Features that require DB will be unavailable until it connects:', error.message || error);
+            });
     } catch (error) {
         console.error('❌ Failed to start server:', error);
         process.exit(1);
