@@ -26,6 +26,9 @@ dist-ssr
 server/uploads/
 # Generated processing outputs
 server/output/
+# Environment secrets (do not commit)
+server/.env
+.env
 # Ignore root-level scripts directory (local utilities, logs, and templates)
 # This will NOT affect server/scripts since the leading slash limits scope to project root.
 /scripts/
