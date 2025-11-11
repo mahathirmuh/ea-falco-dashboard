@@ -159,9 +159,9 @@ function buildAddCardEnvelope(profile, { namespace = SOAP_NAMESPACE, soapVersion
         <AccessLevel>${escapeXml(profile.AccessLevel)}</AccessLevel>
         <FaceAccessLevel>${escapeXml(profile.FaceAccessLevel)}</FaceAccessLevel>
         <LiftAccessLevel>${escapeXml(profile.LiftAccessLevel || '')}</LiftAccessLevel>
-        <BypassAP>${escapeXml(profile.BypassAP || 'false')}</BypassAP>
-        <ActiveStatus>${escapeXml(profile.ActiveStatus)}</ActiveStatus>
-        <NonExpired>${escapeXml(profile.NonExpired)}</NonExpired>
+        <BypassAP>${boolToXml(profile.BypassAP || 'false')}</BypassAP>
+        <ActiveStatus>${boolToXml(profile.ActiveStatus)}</ActiveStatus>
+        <NonExpired>${boolToXml(profile.NonExpired)}</NonExpired>
         <ExpiredDate>${escapeXml(profile.ExpiredDate)}</ExpiredDate>
         <VehicleNo>${escapeXml(profile.VehicleNo || '')}</VehicleNo>
         <FloorNo>${escapeXml(profile.FloorNo || '')}</FloorNo>
@@ -184,7 +184,7 @@ function buildAddCardEnvelope(profile, { namespace = SOAP_NAMESPACE, soapVersion
         <Email>${escapeXml(profile.Email)}</Email>
         <MobileNo>${escapeXml(profile.MobileNo)}</MobileNo>
         ${photoTag}
-        <Download>${escapeXml(profile.Download)}</Download>
+        <DownloadCard>${boolToXml((profile.DownloadCard !== undefined ? profile.DownloadCard : (profile.Download !== undefined ? profile.Download : '1')))}</DownloadCard>
       </CardProfile>
     </AddCard>
   </soap:Body>
@@ -199,6 +199,15 @@ function escapeXml(unsafe) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&apos;');
+}
+
+// Normalize boolean-like values to numeric '1' or '0' for controllers that expect numeric booleans.
+function boolToXml(val) {
+  const s = String(val ?? '').trim().toLowerCase();
+  if (s === '1' || s === 'true' || s === 'yes' || s === 'y' || s === 'on' || s === 'permanent' || s === 'active') return '1';
+  if (s === '0' || s === 'false' || s === 'no' || s === 'n' || s === 'off' || s === 'inactive' || s === 'temporary') return '0';
+  // default: treat empty/unknown as false
+  return '0';
 }
 
 /**
@@ -261,9 +270,9 @@ function buildUpdateCardEnvelope(profile, { namespace = SOAP_NAMESPACE, soapVers
         <AccessLevel>${escapeXml(profile.AccessLevel || '')}</AccessLevel>
         <FaceAccessLevel>${escapeXml(profile.FaceAccessLevel || '')}</FaceAccessLevel>
         <LiftAccessLevel>${escapeXml(profile.LiftAccessLevel || '')}</LiftAccessLevel>
-        <BypassAP>${escapeXml(profile.BypassAP || 'false')}</BypassAP>
-        <ActiveStatus>${escapeXml(profile.ActiveStatus || 'true')}</ActiveStatus>
-        <NonExpired>${escapeXml(profile.NonExpired || 'true')}</NonExpired>
+        <BypassAP>${boolToXml(profile.BypassAP || 'false')}</BypassAP>
+        <ActiveStatus>${boolToXml(profile.ActiveStatus || 'true')}</ActiveStatus>
+        <NonExpired>${boolToXml(profile.NonExpired || 'true')}</NonExpired>
         <ExpiredDate>${escapeXml(profile.ExpiredDate || '')}</ExpiredDate>
         <VehicleNo>${escapeXml(profile.VehicleNo || '')}</VehicleNo>
         <FloorNo>${escapeXml(profile.FloorNo || '')}</FloorNo>
@@ -286,7 +295,7 @@ function buildUpdateCardEnvelope(profile, { namespace = SOAP_NAMESPACE, soapVers
         <Email>${escapeXml(profile.Email || '')}</Email>
         <MobileNo>${escapeXml(profile.MobileNo || '')}</MobileNo>
         ${photoTag}
-        <Download>${escapeXml(profile.Download || 'true')}</Download>
+        <DownloadCard>${boolToXml((profile.DownloadCard !== undefined ? profile.DownloadCard : (profile.Download !== undefined ? profile.Download : '1')))}</DownloadCard>
       </CardProfile>
     </UpdateCard>
   </soap:Body>

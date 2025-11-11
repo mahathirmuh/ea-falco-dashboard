@@ -853,6 +853,7 @@ app.post('/api/vault/update-card-db', async (req, res) => {
         const candidates = Array.from(new Set([envTbl, 'carddb', 'CardDB', 'dbo.carddb', 'dbo.CardDB'].filter(Boolean)));
         console.log(`[CardDB] update-card-db candidates: ${candidates.join(', ')}`);
         let result;
+        let lastError;
         for (const tbl of candidates) {
             try {
                 const info = await getColumns(tbl);
@@ -867,13 +868,60 @@ app.post('/api/vault/update-card-db', async (req, res) => {
                 if (hasDel) whereParts.push(activeFilter);
                 const q = `SELECT TOP 1 * FROM ${qualified} WHERE ${whereParts.join(' AND ')}`;
                 result = await request.query(q);
-                if (result.recordset && result.recordset.length > 0) break;
+                if (result && result.recordset && result.recordset.length > 0) break;
             } catch (e) {
+                lastError = e;
                 // keep trying other candidates
             }
         }
-        if (!result.recordset || result.recordset.length === 0) {
-            return res.status(404).json({ success: false, error: `Card not found in carddb: ${cn}` });
+        // If none of the static candidates worked, try discovery like the list endpoint
+        if (!result || !result.recordset || result.recordset.length === 0) {
+            try {
+                const discover = await request.query(`
+                    SELECT DISTINCT TOP 50 t.TABLE_SCHEMA, t.TABLE_NAME
+                    FROM INFORMATION_SCHEMA.TABLES t
+                    WHERE t.TABLE_TYPE = 'BASE TABLE'
+                    AND (
+                        t.TABLE_NAME LIKE '%card%' OR t.TABLE_NAME LIKE '%Card%'
+                        OR EXISTS (
+                            SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS c
+                            WHERE c.TABLE_SCHEMA = t.TABLE_SCHEMA AND c.TABLE_NAME = t.TABLE_NAME
+                            AND c.COLUMN_NAME IN ('CardNo','cardno','StaffNo','staffno','Name','NAME')
+                        )
+                    )
+                `);
+                const list = (discover.recordset || []).map(r => `${r.TABLE_SCHEMA}.${r.TABLE_NAME}`);
+                console.log(`[CardDB] Discovery candidates (update-card-db): ${list.join(', ')}`);
+                for (const dn of list) {
+                    try {
+                        const info = await getColumns(dn);
+                        if (!info.schema) continue;
+                        const qualified = bracketize(`${info.schema}.${info.table}`);
+                        const hasCardNoLower = info.columns.has('cardno');
+                        const hasCardNo = info.columns.has('CardNo');
+                        const hasDel = info.columns.has('Del_State');
+                        if (!hasCardNoLower && !hasCardNo) continue;
+                        const cardPred = [hasCardNoLower ? '[cardno] = @cardNo' : null, hasCardNo ? '[CardNo] = @cardNo' : null].filter(Boolean).join(' OR ');
+                        const whereParts = [ `(${cardPred})` ];
+                        if (hasDel) whereParts.push(activeFilter);
+                        const q = `SELECT TOP 1 * FROM ${qualified} WHERE ${whereParts.join(' AND ')}`;
+                        const r = await request.query(q);
+                        if (r && r.recordset && r.recordset.length > 0) {
+                            result = r;
+                            break;
+                        }
+                    } catch (e) {
+                        lastError = e;
+                        // keep trying
+                    }
+                }
+            } catch (discErr) {
+                lastError = discErr;
+            }
+        }
+        if (!result || !result.recordset || result.recordset.length === 0) {
+            const msg = lastError && lastError.message ? lastError.message : `Card not found in CardDB: ${cn}`;
+            return res.status(404).json({ success: false, error: msg });
         }
         const row = result.recordset[0] || {};
 

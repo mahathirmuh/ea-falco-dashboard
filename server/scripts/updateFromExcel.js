@@ -225,7 +225,7 @@ async function main() {
         else if (v.includes('labota')) override.VehicleNo = 'Labota';
         else if (v.includes('local') || v.includes('no access')) override.VehicleNo = 'NoAccess';
       }
-      if (typeof profile.Download !== 'undefined') override.Download = profile.Download;
+    if (typeof profile.Download !== 'undefined') override.Download = (String(profile.Download).trim().toLowerCase() === '0' || String(profile.Download).trim().toLowerCase() === 'false') ? '0' : '1';
       if (accessLevelOverride) override.AccessLevel = String(accessLevelOverride).trim();
       // Apply additional overrides from CLI (Excel mode)
       if (faceLevelOverride) override.FaceAccessLevel = String(faceLevelOverride).trim();
@@ -244,7 +244,7 @@ async function main() {
       if (vehicleOverride) override.VehicleNo = String(vehicleOverride).trim().slice(0, MAX.VehicleNo);
       if (typeof activeOverride !== 'undefined' && activeOverride !== null) {
         const val = String(activeOverride).trim().toLowerCase();
-        override.ActiveStatus = (val === 'true' || val === '1' || val === 'active' || val === 'permanent') ? 'true' : 'false';
+        override.ActiveStatus = (val === 'true' || val === '1' || val === 'active' || val === 'permanent') ? '1' : '0';
       }
       if (messhallOverride) {
         const mv = String(messhallOverride).trim().toLowerCase();
@@ -311,9 +311,9 @@ async function main() {
           }
         }
         // Preserve Download preference from original mapping
-        if (typeof profile.Download !== 'undefined') {
-          override.Download = profile.Download;
-        }
+  if (typeof profile.Download !== 'undefined') {
+    override.Download = (String(profile.Download).trim().toLowerCase() === '0' || String(profile.Download).trim().toLowerCase() === 'false') ? '0' : '1';
+  }
         const single = await registrar.updateCsvRowToVault({ csvPath, index: idx, endpointBaseUrl: endpoint, override });
         if (single && single.rowStatus && single.rowStatus.ok) {
           retryUpdated += 1;
@@ -386,14 +386,14 @@ function buildProfileFromDbRow(row) {
     Address2: clip(row.Address2 || '', max.Address2),
     Email: clip(row.Email || '', max.Email),
     MobileNo: clip(row.MobileNo || row.Phone || row.Contact || '', max.MobileNo),
-    ActiveStatus: 'true',
-    NonExpired: 'true',
+    ActiveStatus: '1',
+    NonExpired: '1',
     ExpiredDate: String(row.ExpiredDate || '').trim(),
     AccessLevel: String(row.AccessLevel || row.MESSHALL || row.Access || '00').trim(),
     FaceAccessLevel: String(row.FaceAccessLevel || '00').trim(),
     LiftAccessLevel: String(row.LiftAccessLevel || '00').trim(),
     VehicleNo: clip(row.VehicleNo || row.Vehicle || row.Remark || '', max.VehicleNo),
-    Download: 'true',
+    Download: '1',
     Photo: null,
     StaffNo: clip(row.StaffNo || row.StaffID || '', max.StaffNo),
   };
