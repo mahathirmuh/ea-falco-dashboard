@@ -343,6 +343,7 @@ app.get('/api/jobs', async (req, res) => {
     try {
         const jobs = await jobManager.getAllJobs();
         const stats = await jobManager.getJobStats();
+        console.log(`[HTTP] /api/jobs -> jobs=${jobs.length} stats=${JSON.stringify(stats)}`);
         
         res.json({
             success: true,
@@ -1116,7 +1117,8 @@ async function startServer() {
             console.log(`📁 Upload directory: ${uploadDir}`);
             console.log(`📁 Output directory: ${outputDir}`);
             console.log(`🔗 Health check: http://localhost:${PORT}/api/health`);
-            console.log(`💾 Database: ${process.env.DATADB_SERVER}:${process.env.DATADB_PORT}/${process.env.DATADB_NAME}`);
+            console.log(`💾 AppDB: ${process.env.APPDB_SERVER || '(unset)'}:${process.env.APPDB_PORT || '1433'}/${process.env.APPDB_NAME || '(unset)'}`);
+            console.log(`💾 Vault DB (DATADB): ${process.env.DATADB_SERVER || '(unset)'}:${process.env.DATADB_PORT || '1433'}/${process.env.DATADB_NAME || '(unset)'}`);
         });
 
         // Attempt database connection without blocking server startup
@@ -1126,6 +1128,15 @@ async function startServer() {
                 // Initialize JobManager after database connection
                 jobManager = new JobManager();
                 console.log('✅ JobManager initialized');
+                // Quick sanity check: count ProcessingBatches
+                database.query('SELECT COUNT(*) AS cnt FROM ProcessingBatches')
+                    .then(r => {
+                        const cnt = r?.recordset?.[0]?.cnt ?? 0;
+                        console.log(`[AppDB] ProcessingBatches row count: ${cnt}`);
+                    })
+                    .catch(err => {
+                        console.error('[AppDB] ProcessingBatches count failed:', err?.message || err);
+                    });
             })
             .catch((error) => {
                 console.error('⚠️ Database connection failed. Features that require DB will be unavailable until it connects:', error.message || error);

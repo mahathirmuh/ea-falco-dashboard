@@ -72,6 +72,7 @@ class JobManager {
     }
 
     async getJob(jobId) {
+        console.log('[JobManager] getJob start:', { jobId });
         try {
             const query = `
                 SELECT 
@@ -92,6 +93,7 @@ class JobManager {
             const result = await database.query(query, { jobId });
             
             if (result.recordset.length === 0) {
+                console.warn(`[JobManager] getJob: job ${jobId} not found`);
                 return null;
             }
 
@@ -116,6 +118,7 @@ class JobManager {
     }
 
     async getAllJobs() {
+        console.log('[JobManager] getAllJobs start');
         try {
             const query = `
                 SELECT 
@@ -134,6 +137,8 @@ class JobManager {
             `;
 
             const result = await database.query(query);
+            const count = (result.recordset || []).length;
+            console.log(`[JobManager] getAllJobs: fetched ${count} jobs`);
             
             return result.recordset.map(batch => ({
                 id: batch.id,
@@ -256,6 +261,7 @@ class JobManager {
     }
 
     async cancelJob(jobId) {
+        console.log('[JobManager] cancelJob start:', { jobId });
         try {
             // Check if job exists and is in a cancellable state
             const job = await this.getJob(jobId);
@@ -286,6 +292,7 @@ class JobManager {
     }
 
     async getJobsByStatus(status) {
+        console.log('[JobManager] getJobsByStatus start:', { status });
         try {
             const dbStatus = this.mapToDatabaseStatus(status);
             const query = `
@@ -306,6 +313,8 @@ class JobManager {
             `;
 
             const result = await database.query(query, { status: dbStatus });
+            const count = (result.recordset || []).length;
+            console.log(`[JobManager] getJobsByStatus: ${count} jobs with status ${status}`);
             
             return result.recordset.map(batch => ({
                 id: batch.id,
@@ -370,6 +379,7 @@ class JobManager {
                 }
             });
 
+            console.log('[JobManager] getJobStats result:', stats);
             return stats;
         } catch (err) {
             console.error('Error getting job stats:', err);
