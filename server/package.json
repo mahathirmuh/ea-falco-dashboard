@@ -13,7 +13,6 @@
   "dependencies": {
     "@tensorflow-models/blazeface": "^0.1.0",
     "@tensorflow/tfjs": "^4.22.0",
-    "@tensorflow/tfjs-node": "^4.22.0",
     "@vladmandic/face-api": "^1.7.15",
     "archiver": "^7.0.1",
     "compression": "^1.7.4",

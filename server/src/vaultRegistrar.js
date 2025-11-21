@@ -1,4 +1,5 @@
 const fs = require('fs');
+const fsp = fs.promises;
 const path = require('path');
 const fse = require('fs-extra');
 const XLSX = require('xlsx');
@@ -28,7 +29,7 @@ function ts() { return new Date().toISOString(); }
 function appendTextLog(outputDir, text) {
   try {
     const logPath = path.join(outputDir, 'vault-registration.log');
-    fs.appendFileSync(logPath, `[${ts()}] ${text}\n`, { encoding: 'utf8' });
+    fsp.appendFile(logPath, `[${ts()}] ${text}\n`, { encoding: 'utf8' }).catch(() => {});
   } catch {}
 }
 // Write to file and mirror to backend terminal
@@ -41,14 +42,14 @@ function logInfo(outputDir, text) {
 function appendJsonLog(outputDir, obj) {
   try {
     const jsonlPath = path.join(outputDir, 'vault-registration-log.jsonl');
-    fs.appendFileSync(jsonlPath, JSON.stringify({ time: ts(), ...obj }) + '\n', { encoding: 'utf8' });
+    fsp.appendFile(jsonlPath, JSON.stringify({ time: ts(), ...obj }) + '\n', { encoding: 'utf8' }).catch(() => {});
   } catch {}
 }
 // Dedicated logging for Update operations (batch and individual)
 function appendUpdateTextLog(outputDir, text) {
   try {
     const logPath = path.join(outputDir, 'vault-update.log');
-    fs.appendFileSync(logPath, `[${ts()}] ${text}\n`, { encoding: 'utf8' });
+    fsp.appendFile(logPath, `[${ts()}] ${text}\n`, { encoding: 'utf8' }).catch(() => {});
   } catch {}
 }
 function logUpdateInfo(outputDir, text) {
@@ -58,7 +59,7 @@ function logUpdateInfo(outputDir, text) {
 function appendUpdateJsonLog(outputDir, obj) {
   try {
     const jsonlPath = path.join(outputDir, 'vault-update-log.jsonl');
-    fs.appendFileSync(jsonlPath, JSON.stringify({ time: ts(), ...obj }) + '\n', { encoding: 'utf8' });
+    fsp.appendFile(jsonlPath, JSON.stringify({ time: ts(), ...obj }) + '\n', { encoding: 'utf8' }).catch(() => {});
   } catch {}
 }
 // Produce a short snippet suitable for console output
@@ -229,7 +230,7 @@ async function postAddCard(endpointBaseUrl, envelope, { soapVersion = SOAP_VERSI
       };
   const res = await fetch(url, {
     method: 'POST',
-    headers,
+    headers: { ...headers, Connection: 'keep-alive' },
     body: envelope,
   });
   const text = await res.text();
@@ -321,7 +322,7 @@ async function postUpdateCard(endpointBaseUrl, envelope, { soapVersion = SOAP_VE
       };
   const res = await fetch(url, {
     method: 'POST',
-    headers,
+    headers: { ...headers, Connection: 'keep-alive' },
     body: envelope,
   });
   const text = await res.text();
@@ -458,13 +459,14 @@ function mapRowToUpdateProfile(row) {
   const faceAccessLevelExplicit = s(row['FACE ACCESS LEVEL'] || row['Face Access Level'] || row['FaceAccessLevel']);
   const liftAccessLevelExplicit = s(row['LIFT ACCESS LEVEL'] || row['Lift Access Level'] || row['LiftAccessLevel']);
 
-  // Standardize VehicleNo and clip safely to 15 chars
+  // Standardize VehicleNo and clip safely to 15 chars, then uppercase
   if (vehicleNo) {
     const v = String(vehicleNo).toLowerCase();
     if (v.includes('makarti')) vehicleNo = 'Makarti';
     else if (v.includes('labota')) vehicleNo = 'Labota';
     else if (v.includes('local') || v.includes('no access')) vehicleNo = 'NoAccess';
     vehicleNo = clip(vehicleNo, MAX.VehicleNo);
+    vehicleNo = vehicleNo.toUpperCase();
   }
 
   const profile = {
@@ -805,7 +807,7 @@ async function registerCsvPathToVault({ csvPath, endpointBaseUrl, overrides = []
 }
 
 // Update existing cards from a CSV/Excel path
-async function updateCsvPathToVault({ csvPath, endpointBaseUrl, overrides = [] }) {
+async function updateCsvPathToVault({ csvPath, endpointBaseUrl, overrides = [], indices, concurrency = 3 }) {
   const dir = path.dirname(csvPath);
   const rows = readRowsFromCsvPath(csvPath);
   const details = [];
@@ -813,18 +815,26 @@ async function updateCsvPathToVault({ csvPath, endpointBaseUrl, overrides = [] }
   let registered = 0;
   let withPhoto = 0;
   let withoutPhoto = 0;
-  const attempted = rows.length;
+  const total = Array.isArray(indices) && indices.length > 0 ? indices.length : rows.length;
+  let attempted = 0;
+  let skipped = 0;
 
-  // Batch update logging header
   logUpdateInfo(dir, `Start Update (CSV) path=${csvPath} endpoint=${endpointBaseUrl || '(env default)'} rows=${rows.length}`);
-  appendUpdateJsonLog(dir, { event: 'update_batch_start', csvPath, endpointBaseUrl, rows: rows.length, overridesCount: Array.isArray(overrides) ? overrides.length : 0 });
+  appendUpdateJsonLog(dir, { event: 'update_batch_start', csvPath, endpointBaseUrl, rows: rows.length, overridesCount: Array.isArray(overrides) ? overrides.length : 0, attempted });
 
-  for (let i = 0; i < rows.length; i++) {
+  const indexList = Array.isArray(indices) && indices.length > 0 ? indices.slice() : Array.from({ length: rows.length }, (_, i) => i);
+
+  async function processIndex(i) {
     const row = rows[i];
     const startedAt = Date.now();
     let profile = mapRowToUpdateProfile(row);
+    if (!profile.CardNo || String(profile.CardNo).trim() === '') {
+      skipped++;
+      appendUpdateJsonLog(dir, { event: 'row_skipped_missing_cardno', index: i });
+      return;
+    }
+    attempted++;
     appendUpdateJsonLog(dir, { event: 'row_mapped_update', index: i, cardNo: profile.CardNo, staffNo: profile.StaffNo, name: profile.Name });
-    // Access level resolution source logging
     const accessLevelExplicit = s(row['ACCESS LEVEL'] || row['Access Level'] || row['AccessLevel']);
     const messRaw = s(row['MESSHALL'] || row['MessHall'] || row['Mess Hall']);
     let accessSource = 'default';
@@ -851,8 +861,10 @@ async function updateCsvPathToVault({ csvPath, endpointBaseUrl, overrides = [] }
       const resp = await postUpdateCard(endpointBaseUrl, envelope);
       appendUpdateJsonLog(dir, { event: 'soap_response_update', index: i, status: resp.status, httpStatus: resp.httpStatus, errCode: resp.errCode, errMessage: resp.errMessage, raw: resp.raw });
       const ok = resp.status === 'ok' && (!resp.errCode || resp.errCode === '0');
-      if (ok) registered++; else errors.push({ code: 'VAULT_ERROR', message: resp.errMessage || 'Unknown error', errCode: resp.errCode, cardNo: profile.CardNo, index: i });
+      const durationMs = Date.now() - startedAt;
+      if (ok) registered++; else errors.push({ code: 'VAULT_ERROR', message: resp.errMessage || 'Unknown error', errCode: resp.errCode, cardNo: profile.CardNo, index: i, durationMs });
       details.push({
+        index: i,
         cardNo: profile.CardNo,
         name: profile.Name,
         hasPhoto: !!profile.Photo,
@@ -862,18 +874,35 @@ async function updateCsvPathToVault({ csvPath, endpointBaseUrl, overrides = [] }
         staffNo: profile.StaffNo,
         sourceRow: row,
         profile,
+        success: ok,
+        durationMs,
       });
-      appendUpdateJsonLog(dir, { event: 'row_update_complete', index: i, cardNo: profile.CardNo, accessLevel: profile.AccessLevel, success: ok, durationMs: Date.now() - startedAt });
+      appendUpdateJsonLog(dir, { event: 'row_update_complete', index: i, cardNo: profile.CardNo, accessLevel: profile.AccessLevel, success: ok, durationMs });
     } catch (err) {
-      errors.push({ code: 'REQUEST_FAILED', message: err.message, cardNo: profile.CardNo, index: i });
-      appendUpdateJsonLog(dir, { event: 'error_update', index: i, cardNo: profile.CardNo, message: err.message, stack: err.stack });
+      const durationMs = Date.now() - startedAt;
+      errors.push({ code: 'REQUEST_FAILED', message: err.message, cardNo: profile.CardNo, index: i, durationMs });
+      appendUpdateJsonLog(dir, { event: 'error_update', index: i, cardNo: profile.CardNo, message: err.message, stack: err.stack, durationMs });
       logUpdateInfo(dir, `Row ${i}: REQUEST_FAILED for cardNo=${profile.CardNo} message=${err.message}`);
     }
   }
 
-  logUpdateInfo(dir, `Update batch complete: Attempted=${attempted}, Updated=${registered}, WithPhoto=${withPhoto}, WithoutPhoto=${withoutPhoto}, Errors=${errors.length}`);
-  appendUpdateJsonLog(dir, { event: 'update_batch_complete', summary: { attempted, registered, withPhoto, withoutPhoto, errors: errors.length } });
-  return { attempted, registered, withPhoto, withoutPhoto, details, errors };
+  async function runPool(list, limit) {
+    const executing = new Set();
+    for (const i of list) {
+      const p = processIndex(i).then(() => executing.delete(p));
+      executing.add(p);
+      if (executing.size >= limit) {
+        await Promise.race(executing);
+      }
+    }
+    await Promise.all(Array.from(executing));
+  }
+
+  await runPool(indexList, Math.max(1, Number(concurrency) || 6));
+
+  logUpdateInfo(dir, `Update batch complete: Attempted=${attempted}, Skipped=${skipped}, Updated=${registered}, WithPhoto=${withPhoto}, WithoutPhoto=${withoutPhoto}, Errors=${errors.length}`);
+  appendUpdateJsonLog(dir, { event: 'update_batch_complete', summary: { attempted, skipped, registered, withPhoto, withoutPhoto, errors: errors.length } });
+  return { attempted, skipped, registered, withPhoto, withoutPhoto, details, errors };
 }
 
 // Update a single row (by index) from a CSV/Excel path
@@ -924,6 +953,11 @@ async function updateCsvRowToVault({ csvPath, index, endpointBaseUrl, override }
     }
     appendUpdateJsonLog(dir, { event: 'single_override_applied_update', requestId, index, cardNo: profile.CardNo, download: profile.Download });
     logUpdateInfo(dir, `Row ${index} [${requestId}]: override applied, CardNo=${profile.CardNo}, Download=${profile.Download}`);
+  }
+
+  // Enforce uppercase VehicleNo for UpdateCard
+  if (profile.VehicleNo) {
+    profile.VehicleNo = String(profile.VehicleNo).toUpperCase();
   }
 
   const hasPhoto = tryAttachPhoto(dir, profile);

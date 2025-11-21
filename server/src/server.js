@@ -18,6 +18,8 @@ const sql = require('mssql');
 const { photoExists } = require('./vaultRegistrar');
 const imageProcessor = new ImageProcessor();
 let jobManager; // Will be initialized after database connection
+// In-memory cache for CardDB resolution to speed up repeated queries
+let cardDbResolutionCache = { table: null, schema: null, columns: [], ts: 0 };
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -539,14 +541,15 @@ app.post('/api/vault/preview-update-csv', async (req, res) => {
 // Update existing Vault cards from a direct CSV/Excel path
 app.post('/api/vault/update-csv', async (req, res) => {
     try {
-        const { csvPath, endpointBaseUrl, overrides } = req.body || {};
+        const { csvPath, endpointBaseUrl, overrides, indices, concurrency } = req.body || {};
         if (!csvPath) {
             return res.status(400).json({ success: false, error: 'csvPath is required' });
         }
         const endpoint = endpointBaseUrl || process.env.VAULT_API_BASE || 'http://10.60.10.6/Vaultsite/APIwebservice.asmx';
-        const result = await updateCsvPathToVault({ csvPath, endpointBaseUrl: endpoint, overrides });
-        const success = (Array.isArray(result.errors) ? result.errors.length : 0) === 0;
-        res.json({ success, ...result });
+        const result = await updateCsvPathToVault({ csvPath, endpointBaseUrl: endpoint, overrides, indices, concurrency });
+        const errorCount = Array.isArray(result.errors) ? result.errors.length : 0;
+        const success = (result.attempted || 0) > 0; // treat partial as success to avoid UX hard-fail
+        res.json({ success, errorCount, ...result });
     } catch (error) {
         console.error('Error updating Vault cards from CSV:', error);
         res.status(500).json({ success: false, error: 'Failed to update Vault cards from CSV', details: error.message });
@@ -710,7 +713,7 @@ app.get('/api/vault/carddb', async (req, res) => {
             }
             const qualified = bracketize(`${info.schema}.${info.table}`);
             const hasDel = info.columns.has('Del_State');
-            const searchable = ['Name','CardNo','cardno','StaffNo','staffno'].filter(c => info.columns.has(c));
+            const searchable = ['Name','NAME','CardNo','cardno','CARDNO','StaffNo','staffno','STAFFNO'].filter(c => info.columns.has(c));
             const whereTerms = [];
             if (sTerm && searchable.length > 0) {
                 request.input('pattern', sql.NVarChar, `%${sTerm}%`);
@@ -720,13 +723,40 @@ app.get('/api/vault/carddb', async (req, res) => {
             }
             if (hasDel) whereTerms.push(activeFilter);
             const where = whereTerms.length > 0 ? `WHERE ${whereTerms.join(' AND ')}` : '';
-            return `SELECT TOP (@topN) * FROM ${qualified} ${where}`;
+            // Project only relevant columns and add NOLOCK to improve read performance
+            const selectCols = [];
+            const addIf = (name, alias) => { if (info.columns.has(name)) selectCols.push(`[${name}] AS ${alias}`); };
+            addIf('CardNo', 'CardNo'); addIf('cardno', 'CardNo'); addIf('CARDNO', 'CardNo');
+            addIf('Name', 'Name'); addIf('NAME', 'Name');
+            addIf('StaffNo', 'StaffNo'); addIf('staffno', 'StaffNo'); addIf('STAFFNO', 'StaffNo');
+            addIf('VehicleNo', 'VehicleNo');
+            addIf('DueDay', 'DueDay');
+            addIf('ExpiryDate', 'ExpiryDate'); addIf('ExpiredDate', 'ExpiryDate');
+            addIf('Status', 'Status');
+            addIf('Department', 'Department');
+            addIf('AccessLevel', 'AccessLevel');
+            addIf('LiftAccessLevel', 'LiftAccessLevel');
+            addIf('FaceAccessLevel', 'FaceAccessLevel');
+            addIf('ActiveStatus', 'ActiveStatus');
+            const selectList = selectCols.length > 0 ? selectCols.join(', ') : '*';
+            return `SELECT TOP (@topN) ${selectList} FROM ${qualified} WITH (NOLOCK) ${where}`;
         };
 
         let result;
         try {
-            const query = await buildQuery(baseTbl);
-            result = await request.query(query);
+            // Prefer cached resolved table if available and no explicit env override
+            if (!envTbl && cardDbResolutionCache.table && (Date.now() - (cardDbResolutionCache.ts || 0) < 5 * 60 * 1000)) {
+                try {
+                    const qCached = await buildQuery(cardDbResolutionCache.table);
+                    result = await request.query(qCached);
+                } catch {
+                    // fallback to base
+                }
+            }
+            if (!result) {
+                const query = await buildQuery(baseTbl);
+                result = await request.query(query);
+            }
         } catch (primaryErr) {
             // Fallback attempts: common casing or dbo-qualified table name
             const tryQuery = async (tblName) => {
@@ -749,11 +779,11 @@ app.get('/api/vault/carddb', async (req, res) => {
             }
             if (!ok) {
                 // Discover likely tables by columns or name
-                try {
-                    const discover = await request.query(`
-                        SELECT DISTINCT TOP 30 t.TABLE_SCHEMA, t.TABLE_NAME
+            try {
+                const discover = await request.query(`
+                        SELECT DISTINCT TOP 50 t.TABLE_SCHEMA, t.TABLE_NAME
                         FROM INFORMATION_SCHEMA.TABLES t
-                        WHERE t.TABLE_TYPE = 'BASE TABLE'
+                        WHERE (t.TABLE_TYPE = 'BASE TABLE' OR t.TABLE_TYPE = 'VIEW')
                         AND (
                             t.TABLE_NAME LIKE '%card%' OR t.TABLE_NAME LIKE '%Card%'
                             OR EXISTS (
@@ -767,9 +797,16 @@ app.get('/api/vault/carddb', async (req, res) => {
                     console.log(`[CardDB] Discovery candidates: ${list.join(', ')}`);
                     for (const dn of list) {
                         try {
+                            const info = await getColumns(dn);
+                            if (!info.schema) continue;
+                            const cols = info.columns;
+                            const hasCN = cols.has('CardNo') || cols.has('cardno') || cols.has('CARDNO');
+                            const hasName = cols.has('Name') || cols.has('NAME');
+                            if (!(hasCN && hasName)) continue; // skip unrelated tables like ProcessingBatches
                             result = await tryQuery(dn);
                             console.log(`[CardDB] Discovery succeeded with table=${dn}`);
                             ok = true;
+                            cardDbResolutionCache = { table: dn, schema: info.schema, columns: Array.from(info.columns), ts: Date.now() };
                             break;
                         } catch (e) {
                             // continue
@@ -878,9 +915,9 @@ app.post('/api/vault/update-card-db', async (req, res) => {
         if (!result || !result.recordset || result.recordset.length === 0) {
             try {
                 const discover = await request.query(`
-                    SELECT DISTINCT TOP 50 t.TABLE_SCHEMA, t.TABLE_NAME
+                    SELECT DISTINCT TOP 60 t.TABLE_SCHEMA, t.TABLE_NAME
                     FROM INFORMATION_SCHEMA.TABLES t
-                    WHERE t.TABLE_TYPE = 'BASE TABLE'
+                    WHERE (t.TABLE_TYPE = 'BASE TABLE' OR t.TABLE_TYPE = 'VIEW')
                     AND (
                         t.TABLE_NAME LIKE '%card%' OR t.TABLE_NAME LIKE '%Card%'
                         OR EXISTS (
@@ -1063,7 +1100,7 @@ app.post('/api/vault/update-card-db', async (req, res) => {
             if (v.includes('makarti')) profile.VehicleNo = 'Makarti';
             else if (v.includes('labota')) profile.VehicleNo = 'Labota';
             else if (v.includes('local') || v.includes('no access')) profile.VehicleNo = 'NoAccess';
-            profile.VehicleNo = String(profile.VehicleNo).slice(0, 15);
+            profile.VehicleNo = String(profile.VehicleNo).slice(0, 15).toUpperCase();
         }
 
         const endpoint = endpointBaseUrl || process.env.VAULT_API_BASE || 'http://10.60.10.6/Vaultsite/APIwebservice.asmx';
@@ -1294,5 +1331,47 @@ app.get('/api/process/download/:id', async (req, res) => {
             error: 'Failed to generate ZIP',
             details: error.message
         });
+    }
+});
+app.post('/api/vault/update-progress-csv', async (req, res) => {
+    try {
+        const { csvPath } = req.body || {};
+        if (!csvPath) {
+            return res.status(400).json({ success: false, error: 'csvPath is required' });
+        }
+        const dir = path.dirname(csvPath);
+        const logPath = path.join(dir, 'vault-update-log.jsonl');
+        const exists = await fs.pathExists(logPath);
+        if (!exists) {
+            return res.json({ success: true, rows: {}, completed: false });
+        }
+        const raw = await fs.readFile(logPath, 'utf8');
+        const rows = {};
+        let completed = false;
+        for (const line of raw.split(/\r?\n/)) {
+            const s = line.trim();
+            if (!s) continue;
+            let obj;
+            try { obj = JSON.parse(s); } catch { continue; }
+            const ev = obj.event;
+            if (ev === 'update_batch_complete') { completed = true; continue; }
+            const idx = obj.index;
+            if (typeof idx !== 'number') continue;
+            if (!rows[idx]) rows[idx] = {};
+            if (ev === 'row_skipped_missing_cardno') {
+                rows[idx] = { state: 'skipped' };
+            } else if (ev === 'soap_request_update' || ev === 'row_mapped_update') {
+                rows[idx] = { ...rows[idx], state: 'executing', cardNo: obj.cardNo, name: obj.name, startedAt: obj.time };
+            } else if (ev === 'row_update_complete') {
+                rows[idx] = { ...rows[idx], state: obj.success ? 'success' : 'failed', durationMs: obj.durationMs, cardNo: obj.cardNo };
+            } else if (ev === 'error_update') {
+                rows[idx] = { ...rows[idx], state: 'failed', message: obj.message, durationMs: obj.durationMs, cardNo: obj.cardNo };
+            } else if (ev === 'soap_response_update') {
+                rows[idx] = { ...rows[idx], code: obj.errCode, message: obj.errMessage };
+            }
+        }
+        res.json({ success: true, rows, completed });
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Failed to read update progress', details: error.message });
     }
 });

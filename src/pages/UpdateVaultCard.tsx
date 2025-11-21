@@ -37,6 +37,7 @@ type VaultRegistrationSummary = {
   jobId?: string;
   endpointBaseUrl?: string;
   attempted: number;
+  skipped?: number;
   registered: number;
   withPhoto: number;
   withoutPhoto: number;
@@ -88,7 +89,7 @@ const UpdateVaultCard: React.FC = () => {
   const [cardNoEdits, setCardNoEdits] = useState<Record<number, string>>({});
   const [photoChecks, setPhotoChecks] = useState<Record<number, boolean>>({});
   const [downloadCardEdits, setDownloadCardEdits] = useState<Record<number, boolean>>({});
-  const [rowStatusMap, setRowStatusMap] = useState<Record<number, { state: 'idle' | 'executing' | 'success' | 'failed', code?: string, message?: string, requestId?: string }>>({});
+  const [rowStatusMap, setRowStatusMap] = useState<Record<number, { state: 'idle' | 'executing' | 'success' | 'failed', code?: string, message?: string, requestId?: string, durationMs?: number, cardNo?: string, startedAt?: number }>>({});
   const [uploadedUpdatePath, setUploadedUpdatePath] = useState<string | undefined>();
   const [uploadingUpdate, setUploadingUpdate] = useState(false);
   const [csvUpdatePathInput, setCsvUpdatePathInput] = useState<string>("");
@@ -302,6 +303,16 @@ const UpdateVaultCard: React.FC = () => {
         jobId: data.jobId,
         endpointBaseUrl: data.endpointBaseUrl,
         attempted: data.attempted ?? 0,
+        skipped: (() => {
+          if (typeof data.skipped === 'number') return data.skipped;
+          const dets = Array.isArray(data.details) ? data.details : [];
+          let count = 0;
+          for (const d of dets) {
+            const cn = (d.cardNo ?? '').toString().trim();
+            if (!cn) count++;
+          }
+          return count;
+        })(),
         registered: data.registered ?? 0,
         withPhoto: data.withPhoto ?? 0,
         withoutPhoto: data.withoutPhoto ?? 0,
@@ -323,26 +334,92 @@ const UpdateVaultCard: React.FC = () => {
     try {
       setRegistering(true);
       setRegSummary(null);
-      const overrides = (previewSummary.details || []).map((d, idx) => {
+      const all = Array.from({ length: (previewSummary.details || []).length }, (_, i) => i);
+      const valid = all.filter((idx) => {
+        const d = previewSummary.details[idx];
+        const cn = (cardNoEdits[idx] ?? d.cardNo ?? '').trim();
+        return !!cn;
+      });
+      setRowStatusMap(prev => {
+        const next = { ...prev };
+        for (const idx of valid) {
+          const d = previewSummary.details[idx];
+          const cn = (cardNoEdits[idx] ?? d.cardNo ?? '').trim().slice(0, 10);
+          next[idx] = { ...(next[idx] || {}), state: 'executing', cardNo: cn, startedAt: Date.now() };
+        }
+        return next;
+      });
+      const overrides = valid.map((idx) => {
+        const d = previewSummary.details[idx];
         const cardNo = (cardNoEdits[idx] ?? d.cardNo ?? '').trim().slice(0, 10);
         const defaultDownloadStr = String(d.profile?.DownloadCard ?? 'true');
         const defaultDownload = defaultDownloadStr.toLowerCase() === 'true';
         const downloadCard = (downloadCardEdits[idx] ?? defaultDownload);
         return { index: idx, cardNo, downloadCard };
       });
+      let stopPolling = false;
+      const poll = async () => {
+        if (stopPolling) return;
+        try {
+          const r = await fetch(`/api/vault/update-progress-csv`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ csvPath: uploadedUpdatePath }) });
+          if (r.ok) {
+            const j = await r.json();
+            const rows = j.rows || {};
+            setRowStatusMap(prev => {
+              const next = { ...prev };
+              for (const k of Object.keys(rows)) {
+                const idx = Number(k);
+                const st = rows[k];
+                next[idx] = { ...(next[idx] || {}), state: st.state, code: st.code, message: st.message, durationMs: st.durationMs, cardNo: st.cardNo || next[idx]?.cardNo, startedAt: st.startedAt ? Date.parse(st.startedAt) : (next[idx]?.startedAt) };
+              }
+              return next;
+            });
+            if (j.completed) stopPolling = true;
+          }
+        } catch {}
+      };
+      const pollId = window.setInterval(poll, 1000);
       const res = await fetch(`/api/vault/update-csv`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ csvPath: uploadedUpdatePath, overrides })
+        body: JSON.stringify({ csvPath: uploadedUpdatePath, overrides, indices: valid, concurrency: 6 })
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Update failed');
+      // Allow partial success: do not hard-fail when some rows had errors
+      const errorCount = typeof data.errorCount === 'number' ? data.errorCount : (Array.isArray(data.errors) ? data.errors.length : 0);
+      stopPolling = true;
+      window.clearInterval(pollId);
+      // Populate per-row exec status and duration from batch details
+      try {
+        const dets = Array.isArray(data.details) ? data.details : [];
+        setRowStatusMap((prev) => {
+          const next = { ...prev };
+          for (const d of dets) {
+            const idx = typeof d.index === 'number' ? d.index : undefined;
+            if (typeof idx === 'number') {
+              const ok = d.success === true || (!d.respCode || String(d.respCode) === '0');
+              const code = String(d.respCode ?? '-');
+              const msg = (d.respMessage ?? '').trim();
+              next[idx] = {
+                state: ok ? 'success' : 'failed',
+                code,
+                message: msg || undefined,
+                requestId: data.requestId,
+                durationMs: typeof d.durationMs === 'number' ? d.durationMs : undefined,
+              };
+            }
+          }
+          return next;
+        });
+      } catch {}
+      const clientSkipped = (all.length - valid.length);
       const summary: VaultRegistrationSummary = {
         success: true,
         jobId: data.jobId,
         endpointBaseUrl: data.endpointBaseUrl,
         attempted: data.attempted ?? 0,
+        skipped: ((typeof data.skipped === 'number' ? data.skipped : 0) + clientSkipped),
         registered: data.registered ?? 0,
         withPhoto: data.withPhoto ?? 0,
         withoutPhoto: data.withoutPhoto ?? 0,
@@ -350,7 +427,10 @@ const UpdateVaultCard: React.FC = () => {
         details: Array.isArray(data.details) ? data.details : [],
       };
       setRegSummary(summary);
-      toast({ title: 'Update completed', description: `Updated ${summary.registered}/${summary.attempted} cards.` });
+      const skipped = ((typeof data.skipped === 'number' ? data.skipped : 0) + clientSkipped);
+      const title = errorCount > 0 ? 'Update completed with errors' : 'Update completed';
+      const desc = `Updated ${summary.registered}/${summary.attempted} cards. Skipped ${skipped} missing Card No.${errorCount>0?` Errors: ${errorCount}.`:''}`;
+      toast({ title, description: desc, variant: errorCount > 0 ? 'destructive' : undefined });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       toast({ title: 'Update failed', description: message, variant: 'destructive' });
@@ -372,7 +452,7 @@ const UpdateVaultCard: React.FC = () => {
     }
     try {
       setRowExecuting(prev => ({ ...prev, [index]: true }));
-      setRowStatusMap(prev => ({ ...prev, [index]: { state: 'executing' } }));
+      setRowStatusMap(prev => ({ ...prev, [index]: { state: 'executing', startedAt: Date.now(), cardNo: effectiveCardNo } }));
       const res = await fetch(`/api/vault/update-csv-row`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -424,6 +504,7 @@ const UpdateVaultCard: React.FC = () => {
           code: resolvedCode,
           message: resolvedMessage,
           requestId: data.requestId,
+          durationMs: (typeof rs.durationMs === 'number' ? rs.durationMs : undefined),
         }
       }));
       toast({
@@ -448,7 +529,7 @@ const UpdateVaultCard: React.FC = () => {
   const handleCheckPhotos = async () => {
     if (!previewSummary) return;
     try {
-      const rows = previewSummary.details.slice(0, 100).map((d, idx) => ({ index: idx, cardNo: (cardNoEdits[idx] ?? d.cardNo ?? '').trim(), staffNo: (d.staffNo ?? '').trim() }));
+      const rows = previewSummary.details.map((d, idx) => ({ index: idx, cardNo: (cardNoEdits[idx] ?? d.cardNo ?? '').trim(), staffNo: (d.staffNo ?? '').trim() }));
       const res = await fetch('/api/vault/photo-check-csv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -564,7 +645,7 @@ const UpdateVaultCard: React.FC = () => {
                           <td className="py-2 pr-4">
                             <div className={`text-xs ${color} max-w-xs whitespace-normal break-words`}>
                               {st === 'idle' && 'Idle'}
-                              {st === 'executing' && 'Executing…'}
+                              {st === 'executing' && `Executing… ${cn}`}
                               {st === 'success' && `Success (code ${code})`}
                               {st === 'failed' && `Failed${message ? `: ${message}` : ''} (code ${code})`}
                             </div>
@@ -800,7 +881,7 @@ const UpdateVaultCard: React.FC = () => {
                         <td colSpan={7} className="py-3 text-muted-foreground">No rows found in file</td>
                       </tr>
                     ) : (
-                      previewSummary.details.slice(0, 100).map((d, idx) => (
+                      previewSummary.details.map((d, idx) => (
                         <tr key={`${d.cardNo}-${idx}`} className="border-b">
                           <td className="py-2 pr-4">
                             <Input
@@ -837,12 +918,14 @@ const UpdateVaultCard: React.FC = () => {
                               const code = rowStatusMap[idx]?.code ?? '-';
                               const message = rowStatusMap[idx]?.message;
                               const color = st === 'success' ? 'text-green-600' : st === 'failed' ? 'text-red-600' : st === 'executing' ? 'text-blue-600' : 'text-muted-foreground';
+                              const dur = rowStatusMap[idx]?.durationMs;
+                              const durStr = typeof dur === 'number' ? ` — ${dur}ms` : '';
                               return (
                                 <div className={`text-xs ${color} max-w-xs whitespace-normal break-words`}> 
                                   {st === 'idle' && 'Idle'}
                                   {st === 'executing' && 'Executing…'}
-                                  {st === 'success' && `Success (code ${code})`}
-                                  {st === 'failed' && `Failed${message ? `: ${message}` : ''} (code ${code})`}
+                                  {st === 'success' && `Success (code ${code})${durStr}`}
+                                  {st === 'failed' && `Failed${message ? `: ${message}` : ''} (code ${code})${durStr}`}
                                 </div>
                               );
                             })()}
@@ -879,7 +962,7 @@ const UpdateVaultCard: React.FC = () => {
                     onClick={() => {
                       if (!previewSummary) return;
                       const next: Record<number, boolean> = {};
-                      previewSummary.details.slice(0, 100).forEach((d, idx) => { next[idx] = true; });
+                      previewSummary.details.forEach((d, idx) => { next[idx] = true; });
                       setDownloadCardEdits(next);
                     }}
                   >
@@ -890,7 +973,7 @@ const UpdateVaultCard: React.FC = () => {
                     onClick={() => {
                       if (!previewSummary) return;
                       const next: Record<number, boolean> = {};
-                      previewSummary.details.slice(0, 100).forEach((d, idx) => { next[idx] = false; });
+                      previewSummary.details.forEach((d, idx) => { next[idx] = false; });
                       setDownloadCardEdits(next);
                     }}
                   >
@@ -907,7 +990,7 @@ const UpdateVaultCard: React.FC = () => {
                       {missing > 0 && (
                         <div className="text-sm text-red-600">{missing} row(s) missing Card No</div>
                       )}
-                      <Button onClick={handleExecuteUpdate} disabled={registering || missing > 0 || !uploadedUpdatePath}>
+                      <Button onClick={handleExecuteUpdate} disabled={registering || !uploadedUpdatePath}>
                         {registering ? 'Executing...' : 'Execute update'}
                       </Button>
                     </div>
@@ -970,11 +1053,11 @@ const UpdateVaultCard: React.FC = () => {
             <CardHeader>
               <CardTitle>Update Summary</CardTitle>
               <CardDescription>
-                Attempted {regSummary.attempted}, Updated {regSummary.registered}
+                Attempted {regSummary.attempted}, Updated {regSummary.registered}, Skipped {regSummary.skipped ?? 0}
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
                 <div className="p-3 rounded border">
                   <div className="text-muted-foreground">Attempted</div>
                   <div className="font-medium">{regSummary.attempted}</div>
@@ -982,6 +1065,10 @@ const UpdateVaultCard: React.FC = () => {
                 <div className="p-3 rounded border">
                   <div className="text-muted-foreground">Updated</div>
                   <div className="font-medium">{regSummary.registered}</div>
+                </div>
+                <div className="p-3 rounded border">
+                  <div className="text-muted-foreground">Skipped (Missing Card No)</div>
+                  <div className="font-medium">{regSummary.skipped ?? 0}</div>
                 </div>
                 <div className="p-3 rounded border">
                   <div className="text-muted-foreground">With Photo</div>
