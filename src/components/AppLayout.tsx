@@ -34,8 +34,8 @@ export const AppLayout: React.FC<AppLayoutProps> = ({ title, children }) => {
         <SidebarContent>
           <SidebarMenu>
             <SidebarMenuItem>
-              <Link to="/" className="contents">
-                <SidebarMenuButton isActive={isActive("/")}> 
+              <Link to="/card-processor" className="contents">
+                <SidebarMenuButton isActive={isActive("/card-processor")}> 
                   <FileImage />
                   <span>ID Card Processor</span>
                 </SidebarMenuButton>
